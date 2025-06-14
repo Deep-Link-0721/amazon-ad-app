@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Amazon広告分析アプリ</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
+  <!-- PapaParse for CSV parsing -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+  <div id="root" class="w-full max-w-4xl p-6"></div>
+  <script type="text/javascript">
+    const { useState, useEffect } = React;
+
+    function App() {
+      const [reports, setReports] = useState({});
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState(null);
+
+      // CSV parse helper
+      const parseFile = (file) => new Promise((resolve, reject) => {
+        Papa.parse(file, { header: true, skipEmptyLines: true,
+          complete: (res) => resolve({ name: file.name, data: res.data }),
+          error: (err) => reject(err)
+        });
+      });
+
+      // Load multiple files
+      const loadFiles = async (files) => {
+        setLoading(true);
+        setError(null);
+        const newReports = {};
+        try {
+          const parsed = await Promise.all(Array.from(files).map(parseFile));
+          parsed.forEach(({ name, data }) => {
+            if (/インプレッションシェア/.test(name)) newReports.impressionShare = data;
+            else if (/キャンペーン/.test(name)) newReports.campaign = data;
+            else if (/検索用語/.test(name) && !/インプレッションシェア/.test(name)) newReports.searchTerms = data;
+            else if (/ターゲティング/.test(name)) newReports.targeting = data;
+            else if (/パフォーマンス/.test(name)) newReports.performance = data;
+            else newReports.other = (newReports.other||[]).concat({ name, data });
+          });
+          setReports(newReports);
+        } catch (e) {
+          setError('ファイル読み込み中にエラーが発生しました');
+        }
+        setLoading(false);
+      };
+
+      // Handlers
+      const handleDrop = (e) => { e.preventDefault(); loadFiles(e.dataTransfer.files); };
+      const handleDragOver = (e) => e.preventDefault();
+
+      useEffect(() => {
+        const input = document.getElementById('fileInput');
+        input.onchange = (e) => loadFiles(e.target.files);
+      }, []);
+
+      // Helper for numeric parsing
+      const parseNum = (v) => {
+        const s = String(v).replace(/[,％%\s]/g, '');
+        return isNaN(Number(s)) ? 0 : Number(s);
+      };
+
+      // Render campaign summary
+      const renderCampaign = () => {
+        const camp = reports.campaign || [];
+        if (!camp.length) return null;
+        const headers = Object.keys(camp[0]);
+        const lower = headers.map(h => h.toLowerCase());
+        const impKey = headers[lower.findIndex(h => h.includes('インプレッション') || h.includes('impression'))];
+        const clickKey = headers[lower.findIndex(h => h.includes('クリック') || h.includes('click'))];
+        const costKey = headers[lower.findIndex(h => h.includes('費用') || h.includes('広告費') || h.includes('cost'))];
+        const salesKey = headers[lower.findIndex(h => h.includes('売上') || h.includes('sales'))];
+        if (!impKey || !clickKey) {
+          return React.createElement('div',{className:'text-red-600'},
+            `キャンペーンに必要な「インプレッション」または「クリック」列が見つかりません。ヘッダー: ${headers.join(', ')}`
+          );
+        }
+        const totals = camp.reduce((acc,row) => {
+          acc.imps += parseNum(row[impKey]);
+          acc.clicks += parseNum(row[clickKey]);
+          acc.cost += costKey ? parseNum(row[costKey]) : 0;
+          acc.sales += salesKey ? parseNum(row[salesKey]) : 0;
+          return acc;
+        },{imps:0,clicks:0,cost:0,sales:0});
+        const CTR = totals.clicks/(totals.imps||1);
+        const CVR = totals.sales/(totals.clicks||1);
+        const CPC = totals.cost/(totals.clicks||1);
+        const ACoS = totals.cost/(totals.sales||1);
+        return React.createElement('div',{className:'space-y-2'},
+          React.createElement('h2',{className:'text-xl font-semibold'},'キャンペーン集計'),
+          React.createElement('ul',{},
+            [`CTR: ${(CTR*100).toFixed(1)}%`,`CVR: ${(CVR*100).toFixed(1)}%`,
+             `CPC: ${CPC.toFixed(2)}` ,`ACoS: ${(ACoS*100).toFixed(1)}%`].map((l,i)=
+              React.createElement('li',{key:i,className:'ml-4'},l)
+            )
+          )
+        );
+      };
+
+      // Render search terms
+      const renderSearchTerms = () => {
+        const rows = reports.searchTerms || [];
+        if (!rows.length) return null;
+        const headers = Object.keys(rows[0]);
+        const ctrKey = headers.find(h=>h.includes('クリックスルー率'));
+        const cvrKey = headers.find(h=>h.includes('コンバージョン率'));
+        const parsed = rows.map(r=>({
+          CTR: ctrKey? parseNum(r[ctrKey])/100 : 0,
+          CVR: cvrKey? parseNum(r[cvrKey])/100 : 0
+        }));
+        const good = parsed.filter(p=>p.CTR>=0.01 && p.CVR>=0.1).length;
+        return React.createElement('div',{className:'space-y-2'},
+          React.createElement('h2',{className:'text-xl font-semibold'},'検索用語分析'),
+          React.createElement('p',{},`総キーワード数: ${rows.length}`),
+          React.createElement('p',{},`優良キーワード数: ${good}`)
+        );
+      };
+
+      // Render performance
+      const renderPerformance = () => {
+        const rows = reports.performance || [];
+        if (!rows.length) return null;
+        const headers = Object.keys(rows[0]);
+        const dateKey = headers.find(h=>h.includes('日付'));
+        const clickKey = headers.find(h=>h.includes('クリック'));
+        const costKey = headers.find(h=>h.includes('費用'));
+        const map = {};
+        rows.forEach(r=>{
+          const d = dateKey? r[dateKey]:'unknown';
+          const clicks = clickKey? parseNum(r[clickKey]):0;
+          const cost = costKey? parseNum(r[costKey]):0;
+          if(!map[d]) map[d]={clicks:0,cost:0};
+          map[d].clicks+=clicks; map[d].cost+=cost;
+        });
+        const list = Object.entries(map).map(([d,v])=>`${d}: ${(v.cost/(v.clicks||1)).toFixed(2)}`);
+        return React.createElement('div',{className:'space-y-2'},
+          React.createElement('h2',{className:'text-xl font-semibold'},'期間別CPC'),
+          React.createElement('ul',{},list.slice(0,5).map((l,i)=>React.createElement('li',{key:i},l)), list.length>5?React.createElement('li',{},'...'):null)
+        );
+      };
+
+      // Render impression share
+      const renderImpressionShare = () => {
+        const rows = reports.impressionShare || [];
+        if (!rows.length) return null;
+        const headers = Object.keys(rows[0]);
+        const shareKey = headers.find(h=>h.includes('インプレッションシェア'));
+        if(!shareKey) return React.createElement('div',{className:'text-red-600'},`列「インプレッションシェア」が見つかりません: ${headers.join(', ')}`);
+        const vals = rows.map(r=>parseNum(r[shareKey]));
+        const avg = vals.reduce((a,v)=>a+v,0)/vals.length;
+        return React.createElement('div',{className:'space-y-2'},
+          React.createElement('h2',{className:'text-xl font-semibold'},'平均総インプレッションシェア'),
+          React.createElement('p',{},`${avg.toFixed(1)}%`)
+        );
+      };
+
+      return React.createElement('div',{className:'space-y-6'},
+        React.createElement('h1',{className:'text-3xl font-bold text-center'},'Amazon広告分析アプリ'),
+        error&&React.createElement('p',{className:'text-red-600 text-center'},error),
+        React.createElement('div',{className:'border-4 border-dashed border-gray-400 rounded-lg p-12 text-center bg-white',onDrop:handleDrop,onDragOver:handleDragOver},
+          loading?React.createElement('p',{className:'text-gray-500'},'読み込み中...'):React.createElement('p',{className:'text-gray-700'},
+            'CSVファイルをドラッグ＆ドロップ または ',
+            React.createElement('label',{className:'text-blue-600 underline cursor-pointer'},
+              React.createElement('input',{type:'file',multiple:true,accept:'.csv',id:'fileInput',className:'hidden'}),
+              'ファイルを選択'
+            )
+          )
+        ),
+        renderCampaign(),
+        renderSearchTerms(),
+        renderPerformance(),
+        renderImpressionShare(),
+        React.createElement('div',{className:'bg-white p-4 rounded shadow'},
+          React.createElement('h2',{className:'text-xl font-semibold mb-2'},'読み込み状況'),
+          React.createElement('ul',{},['campaign','searchTerms','targeting','performance','impressionShare'].map(type=>React.createElement('li',{key:type},`${type}: ${reports[type]?'OK':'未'}`)))
+        )
+      );
+    }
+    ReactDOM.render(React.createElement(App),document.getElementById('root'));
+  </script>
+</body>
+</html>
